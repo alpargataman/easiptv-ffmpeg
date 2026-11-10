@@ -31,7 +31,8 @@ jobs:
         run: |
           set -euo pipefail
           source versions.env
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+          # yes dies of SIGPIPE when sdkmanager exits; that is not an error.
+          { yes || true; } | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
             "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION" > /dev/null
 
       - name: Build
