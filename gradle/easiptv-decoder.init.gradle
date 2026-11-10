@@ -1,0 +1,42 @@
+// Gradle init script applied by build-decoder.sh to the androidx/media build.
+// It pins the toolchain of :lib-decoder-ffmpeg without modifying the Media3
+// sources: NDK version, minimum API of the native code, ABIs, and path
+// prefix maps so the native library does not embed machine-specific paths.
+
+def requiredEnv = { String name ->
+    def value = System.getenv(name)
+    if (value == null || value.isEmpty()) {
+        throw new GradleException("easiptv-decoder.init.gradle: environment variable $name is not set")
+    }
+    return value
+}
+
+def ndkVersion = requiredEnv('EASIPTV_NDK_VERSION')
+def minimumApi = requiredEnv('EASIPTV_ANDROID_API').toInteger()
+def abis = requiredEnv('EASIPTV_ABIS').split(' ').findAll { !it.isEmpty() }
+def sourceRoot = requiredEnv('EASIPTV_SOURCE_ROOT')
+def ndkRoot = requiredEnv('EASIPTV_NDK_ROOT')
+def cmakeVersion = requiredEnv('EASIPTV_CMAKE_VERSION')
+
+allprojects { project ->
+    if (project.path != ':lib-decoder-ffmpeg') {
+        return
+    }
+    project.plugins.withId('com.android.library') {
+        project.extensions.getByName('androidComponents').finalizeDsl { android ->
+            android.ndkVersion = ndkVersion
+            android.externalNativeBuild.cmake.version = cmakeVersion
+            android.defaultConfig.minSdk = minimumApi
+            android.defaultConfig.ndk.abiFilters.clear()
+            android.defaultConfig.ndk.abiFilters.addAll(abis)
+            def prefixMaps = [
+                "-ffile-prefix-map=${sourceRoot}=.",
+                "-ffile-prefix-map=${ndkRoot}=/android-ndk",
+                // The CMake build directory name is a hash of absolute paths.
+                "-fdebug-compilation-dir=/easiptv-build",
+            ]
+            android.defaultConfig.externalNativeBuild.cmake.cFlags.addAll(prefixMaps)
+            android.defaultConfig.externalNativeBuild.cmake.cppFlags.addAll(prefixMaps)
+        }
+    }
+}
