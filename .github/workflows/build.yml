@@ -1,4 +1,4 @@
-name: Build decoder
+name: Build FFmpeg
 
 on:
   push:
@@ -37,18 +37,25 @@ jobs:
 
       - name: Build
         shell: bash
-        run: ./build-decoder.sh
+        run: ./build-decoder.sh && ./build-cli.sh
 
       - name: Check that FFmpeg is LGPL-only
         shell: bash
         run: |
           set -euo pipefail
-          for header in build/config-*.h; do
+          for header in build/config-*.h build/cli/config-*.h; do
             grep -qx '#define CONFIG_GPL 0' "$header"
             grep -qx '#define CONFIG_NONFREE 0' "$header"
             grep -qx '#define CONFIG_VERSION3 0' "$header"
             if grep '^#define FFMPEG_CONFIGURATION ' "$header" | grep -qE -- '--enable-(gpl|nonfree|version3)'; then
               echo "$header enables a GPL/nonfree/version3 option" >&2
+              exit 1
+            fi
+          done
+          # The RTSP command line tool only remuxes: no encoder, no decoder
+          for components in build/cli/config_components-*.h; do
+            if grep -E '^#define CONFIG_[A-Z0-9_]+_(ENCODER|DECODER) 1$' "$components"; then
+              echo "$components enables an encoder or a decoder" >&2
               exit 1
             fi
           done
