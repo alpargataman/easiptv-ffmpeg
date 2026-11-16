@@ -157,7 +157,8 @@ verify_executables() {
 }
 
 # The AAR the app consumes: native libraries only, packed byte for byte the same
-# on every build (fixed entry order, times and permissions).
+# on every build (fixed entry order, times and permissions, and no compression:
+# deflate output depends on the zlib of the machine; the APK compresses them).
 write_aar() {
     python3 -I - "$WORK_DIR" "$DIST_DIR/$AAR_NAME" "$ANDROID_API" "$EXECUTABLE_NAME" "${ABI_LIST[@]}" <<'PY'
 import io, sys, zipfile
@@ -166,7 +167,7 @@ stamp = (1981, 1, 1, 0, 0, 0)
 
 def entry(name, mode):
     info = zipfile.ZipInfo(name, stamp)
-    info.compress_type = zipfile.ZIP_DEFLATED
+    info.compress_type = zipfile.ZIP_STORED
     info.create_system = 3
     info.external_attr = (0o100000 | mode) << 16
     return info
@@ -252,6 +253,7 @@ main() {
     write_checksums
     echo "== Done: $DIST_DIR/$AAR_NAME"
     cat "$WORK_DIR/elf.txt"
+    (cd "$WORK_DIR/jni" && sha256sum ./*/"$EXECUTABLE_NAME")
     cat "$DIST_DIR/SHA256SUMS"
 }
 
