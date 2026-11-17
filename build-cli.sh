@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Builds the FFmpeg command line tool EasIPTV Player runs to read RTSP: it only
-# remuxes (-c copy) an RTSP session into MPEG-TS on its standard output. FFmpeg
-# is LGPL-2.1+ only, without encoders or decoders. The executable of each ABI is
+# remuxes (-c copy) an RTSP session into MPEG-TS on its standard output, or into
+# Matroska to record audio MPEG-TS does not carry. FFmpeg is LGPL-2.1+ only,
+# without encoders or decoders, plus the patches of patches/cli (published in
+# changes.diff). The executable of each ABI is
 # named libffmpeg_rtsp.so so that Android installs it in the app's native
 # library directory, the one place an app may execute files from (W^X, API 29+),
 # and ships in an AAR (jni/<abi>/libffmpeg_rtsp.so) that the app consumes like
@@ -9,7 +11,7 @@
 #
 # Usage: ./build-cli.sh   (after ./build-decoder.sh when both go in one release:
 # that script empties dist/, this one adds its files and rewrites SHA256SUMS)
-# Requires: ANDROID_HOME (or ANDROID_SDK_ROOT) with ndk;$NDK_VERSION, git, make, python3.
+# Requires: ANDROID_HOME (or ANDROID_SDK_ROOT) with ndk;$NDK_VERSION, git, make, patch, python3.
 set -euo pipefail
 
 readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,7 +19,9 @@ readonly FFMPEG_SUBMODULE_DIR="$ROOT/external/ffmpeg"
 readonly WORK_DIR="$ROOT/build/cli"
 readonly DIST_DIR="$ROOT/dist"
 readonly FFMPEG_BUILD_DIR="$WORK_DIR/ffmpeg"
+readonly PATCH_DIR="$ROOT/patches/cli"
 readonly EXECUTABLE_NAME="libffmpeg_rtsp.so"
+readonly LICENSE_FILE="COPYING.LGPLv2.1"
 
 fail() {
     echo "build-cli.sh: $*" >&2
@@ -27,6 +31,7 @@ fail() {
 # shellcheck source=versions.env
 source "$ROOT/versions.env"
 read -r -a ABI_LIST <<< "$ABIS"
+IFS=, read -r -a MUXER_LIST <<< "$CLI_MUXERS"
 readonly RELEASE_TAG="app-${APP_VERSION}-${BUILD_NUMBER}"
 readonly AAR_NAME="lib-ffmpeg-rtsp-${FFMPEG_TAG}-${RELEASE_TAG}.aar"
 readonly SOURCE_ARCHIVE="ffmpeg-$FFMPEG_TAG-source.tar.gz"
@@ -91,10 +96,10 @@ configure_options_for() {
 }
 
 # Fails unless the generated config.h is LGPL-2.1+ only and config_components.h
-# has no encoder or decoder.
+# has every muxer of CLI_MUXERS and no encoder or decoder.
 require_lgpl_remuxer_config() {
     local config_header="$1" components_header="$2"
-    local flag
+    local flag muxer
     for flag in CONFIG_GPL CONFIG_NONFREE CONFIG_VERSION3; do
         grep -qx "#define $flag 0" "$config_header" || fail "$config_header does not have $flag 0"
     done
@@ -103,10 +108,41 @@ require_lgpl_remuxer_config() {
     if grep -E '^#define FFMPEG_CONFIGURATION ' "$config_header" | grep -qE -- '--enable-(gpl|nonfree|version3)'; then
         fail "$config_header was configured with a GPL/nonfree/version3 switch"
     fi
-    grep -qx '#define CONFIG_MPEGTS_MUXER 1' "$components_header" || fail "$components_header has no mpegts muxer"
+    for muxer in "${MUXER_LIST[@]}"; do
+        grep -qx "#define CONFIG_${muxer^^}_MUXER 1" "$components_header" || fail "$components_header has no $muxer muxer"
+    done
     if grep -E '^#define CONFIG_[A-Z0-9_]+_(ENCODER|DECODER) 1$' "$components_header"; then
         fail "$components_header enables an encoder or a decoder"
     fi
+}
+
+# Applies patches/cli/*.patch, in name order, to the extracted FFmpeg tree.
+apply_patches() {
+    local patch_file
+    for patch_file in "$PATCH_DIR"/*.patch; do
+        [[ -f "$patch_file" ]] || continue
+        patch -p1 --batch --forward --no-backup-if-mismatch --quiet -d "$FFMPEG_BUILD_DIR" < "$patch_file" \
+            || fail "$patch_file does not apply to FFmpeg $FFMPEG_TAG"
+    done
+}
+
+# Prints the components a config_components.h enables, one line per kind.
+enabled_components_of() {
+    local components_header="$1" kind
+    for kind in PROTOCOL DEMUXER MUXER PARSER BSF; do
+        printf '%s: %s\n' "$kind" "$(sed -nE "s/^#define CONFIG_([A-Z0-9_]+)_${kind} 1$/\1/p" "$components_header" \
+            | tr '[:upper:]' '[:lower:]' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
+    done
+}
+
+# Every ABI must enable the same components: the list in BUILD.md holds for all of them.
+write_enabled_components() {
+    local abi reference="$WORK_DIR/components.txt"
+    enabled_components_of "$WORK_DIR/config_components-${ABI_LIST[0]}.h" > "$reference"
+    for abi in "${ABI_LIST[@]}"; do
+        enabled_components_of "$WORK_DIR/config_components-$abi.h" | cmp -s - "$reference" \
+            || fail "$abi enables other components than ${ABI_LIST[0]}"
+    done
 }
 
 run_logged() {
@@ -132,21 +168,30 @@ build_executable_for() {
         cp ffmpeg "$WORK_DIR/jni/$abi/$EXECUTABLE_NAME"
         run_logged "$WORK_DIR/make-$abi.log" make distclean
     )
-    printf './configure %s\n' "${options[*]}" > "$WORK_DIR/configure-line-$abi.txt"
+    # Options with a space are quoted, so that the line in BUILD.md can be pasted as it is
+    local option configure_line='./configure'
+    for option in "${options[@]}"; do
+        [[ "$option" == *' '* ]] && option="'$option'"
+        configure_line+=" $option"
+    done
+    printf '%s\n' "$configure_line" > "$WORK_DIR/configure-line-$abi.txt"
 }
 
 # One executable per ABI: PIE, 16 KiB LOAD alignment on 64-bit ABIs and a
 # 16 KiB-safe RELRO (scripts/check-relro.sh).
 verify_executables() {
-    local abi executable alignments
+    local abi executable elf_header program_headers alignments
     : > "$WORK_DIR/elf.txt"
     for abi in "${ABI_LIST[@]}"; do
         executable="$WORK_DIR/jni/$abi/$EXECUTABLE_NAME"
         [[ -s "$executable" ]] || fail "no $abi/$EXECUTABLE_NAME"
-        "$TOOLCHAIN_BIN/llvm-readelf" -hW "$executable" | grep -q 'Type:.*DYN' || fail "$abi/$EXECUTABLE_NAME is not a PIE"
-        "$TOOLCHAIN_BIN/llvm-readelf" -lW "$executable" | grep -q 'Requesting program interpreter: /system/bin/linker' \
+        # Read whole before grep -q: with pipefail, grep -q quitting early fails readelf with SIGPIPE
+        elf_header="$("$TOOLCHAIN_BIN/llvm-readelf" -hW "$executable")"
+        program_headers="$("$TOOLCHAIN_BIN/llvm-readelf" -lW "$executable")"
+        grep -q 'Type:.*DYN' <<< "$elf_header" || fail "$abi/$EXECUTABLE_NAME is not a PIE"
+        grep -q 'Requesting program interpreter: /system/bin/linker' <<< "$program_headers" \
             || fail "$abi/$EXECUTABLE_NAME is not an Android executable"
-        alignments="$("$TOOLCHAIN_BIN/llvm-readelf" -lW "$executable" | awk '$1 == "LOAD" { print $NF }' | sort -u | tr '\n' ' ')"
+        alignments="$(awk '$1 == "LOAD" { print $NF }' <<< "$program_headers" | sort -u | tr '\n' ' ')"
         printf '%s %s: %s bytes, LOAD alignment %s\n' "$abi" "$EXECUTABLE_NAME" "$(stat -c %s "$executable")" "$alignments" >> "$WORK_DIR/elf.txt"
         if [[ "$abi" == arm64-v8a || "$abi" == x86_64 ]] && [[ "$alignments" != "0x4000 " ]]; then
             fail "$abi/$EXECUTABLE_NAME is not 16 KiB aligned ($alignments)"
@@ -192,7 +237,7 @@ PY
 }
 
 write_build_notes() {
-    local abi
+    local abi patch_file
     # A rebuild replaces its own section of BUILD.md (the decoder's comes first)
     [[ -f "$DIST_DIR/BUILD.md" ]] && sed -i '/^# FFmpeg command line tool for RTSP/,$d' "$DIST_DIR/BUILD.md"
     {
@@ -200,7 +245,8 @@ write_build_notes() {
         printf '`%s` holds `jni/<abi>/%s`: the `ffmpeg` program of FFmpeg %s (`%s`), LGPL version 2.1 or later\n' \
             "$AAR_NAME" "$EXECUTABLE_NAME" "$FFMPEG_TAG" "$FFMPEG_COMMIT"
         printf '(`CONFIG_GPL 0`, `CONFIG_NONFREE 0`, `CONFIG_VERSION3 0`), without encoders or decoders. EasIPTV Player runs it as\n'
-        printf '`ffmpeg -i rtsp://… -c copy -f mpegts pipe:1` and reads the MPEG-TS from its standard output.\n\n'
+        printf '`ffmpeg -i rtsp://… -c copy -f mpegts pipe:1` and reads the MPEG-TS from its standard output, or with\n'
+        printf '`-f matroska pipe:1` to record audio that MPEG-TS does not carry (G.711, Opus, AMR…).\n\n'
         printf '| Input | Value |\n|---|---|\n'
         printf '| Android NDK | %s |\n' "$NDK_VERSION"
         printf '| Minimum API | %s |\n' "$ANDROID_API"
@@ -210,7 +256,13 @@ write_build_notes() {
         printf '| Muxers | %s |\n' "$CLI_MUXERS"
         printf '| Parsers | %s |\n' "$CLI_PARSERS"
         printf '| Bitstream filters | %s |\n\n' "$CLI_BSFS"
-        printf '## FFmpeg configure lines\n\nRun inside the FFmpeg source tree (`%s`, plus a `VERSION` file that holds `%s`) with the NDK `toolchains/llvm/prebuilt/linux-x86_64/bin` first in `PATH`, then `make ffmpeg`; the stripped `ffmpeg` is `%s`.\n\n' "$SOURCE_ARCHIVE" "$FFMPEG_TAG" "$EXECUTABLE_NAME"
+        printf '## Enabled components\n\nWhat `config_components.h` enables on every ABI (the options above plus what they select); no encoder and no decoder.\n\n```\n%s\n```\n\n' "$(cat "$WORK_DIR/components.txt")"
+        printf '## Changes to FFmpeg\n\nApplied with `patch -p1` to the tree of `%s` before `configure`, in this order; their full text is in `changes.diff` and in `patches/cli` of the repository:\n\n' "$SOURCE_ARCHIVE"
+        for patch_file in "$PATCH_DIR"/*.patch; do
+            [[ -f "$patch_file" ]] || continue
+            printf -- '- `%s`: %s\n' "$(basename "$patch_file")" "$(sed -n '1p' "$patch_file")"
+        done
+        printf '\n## FFmpeg configure lines\n\nRun inside the FFmpeg source tree (`%s` with the patches above, plus a `VERSION` file that holds `%s`) with the NDK `toolchains/llvm/prebuilt/linux-x86_64/bin` first in `PATH`, then `make ffmpeg`; the stripped `ffmpeg` is `%s`.\n\n' "$SOURCE_ARCHIVE" "$FFMPEG_TAG" "$EXECUTABLE_NAME"
         for abi in "${ABI_LIST[@]}"; do
             printf '### %s\n\n```\n%s\n```\n\n' "$abi" "$(cat "$WORK_DIR/configure-line-$abi.txt")"
         done
@@ -220,8 +272,23 @@ write_build_notes() {
             (cd "$WORK_DIR/jni" && sha256sum "$abi/$EXECUTABLE_NAME")
         done
         printf '```\n\n'
-        printf '## Rebuilding (LGPL-2.1)\n\nThe whole executable is FFmpeg code. To use a modified FFmpeg, replace `external/ffmpeg` (or the tree from `%s`) and run `./build-cli.sh`; the resulting AAR replaces the one in the app.\n' "$SOURCE_ARCHIVE"
+        printf '## Rebuilding (LGPL-2.1)\n\nThe whole executable is FFmpeg code (license text: `%s`). To use a modified FFmpeg, replace `external/ffmpeg` (or the tree from `%s`) or add patches to `patches/cli`, and run `./build-cli.sh`; the resulting AAR replaces the one in the app.\n' "$LICENSE_FILE" "$SOURCE_ARCHIVE"
     } >> "$DIST_DIR/BUILD.md"
+}
+
+# Appends the patches of patches/cli to changes.diff (written by build-decoder.sh),
+# replacing this script's section on a rebuild.
+write_changes() {
+    local changes="$DIST_DIR/changes.diff" marker="# Changes to FFmpeg $FFMPEG_TAG in the command line tool"
+    [[ -f "$changes" ]] && sed -i "/^$marker/,\$d" "$changes"
+    {
+        printf '%s (build-cli.sh, patches/cli)\n' "$marker"
+        local patch_file
+        for patch_file in "$PATCH_DIR"/*.patch; do
+            [[ -f "$patch_file" ]] || continue
+            cat "$patch_file"
+        done
+    } >> "$changes"
 }
 
 write_checksums() {
@@ -243,12 +310,16 @@ main() {
     # ffbuild/version.sh would ask git, which finds this repository (its tags, its commit) around
     # the tree: the version that ffmpeg prints comes from VERSION instead, as in FFmpeg's tarballs
     printf '%s\n' "$FFMPEG_TAG" > "$FFMPEG_BUILD_DIR/VERSION"
+    apply_patches
+    cp "$FFMPEG_BUILD_DIR/$LICENSE_FILE" "$DIST_DIR/$LICENSE_FILE"
     local abi
     for abi in "${ABI_LIST[@]}"; do
         build_executable_for "$abi"
     done
+    write_enabled_components
     verify_executables
     write_aar
+    write_changes
     write_build_notes
     write_checksums
     echo "== Done: $DIST_DIR/$AAR_NAME"

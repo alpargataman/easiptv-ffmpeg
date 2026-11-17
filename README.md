@@ -16,8 +16,9 @@ sin `--enable-gpl`, `--enable-nonfree` ni `--enable-version3`.
   [androidx/media](https://github.com/androidx/media) (Media3).
 - La **herramienta de línea de comandos para RTSP** (desde `app-1.5.0-2`): el programa
   `ffmpeg`, que la app ejecuta para remultiplexar una sesión RTSP a MPEG-TS
-  (`-c copy -f mpegts pipe:1`). Sin encoders ni decoders: solo los protocolos, demuxers,
-  parsers y el muxer que hacen falta. Cada ABI se publica como `libffmpeg_rtsp.so` para que
+  (`-c copy -f mpegts pipe:1`) o, desde `app-1.5.0-3`, a Matroska para grabar audio que
+  MPEG-TS no lleva, como G.711, Opus o AMR (`-c copy -f matroska pipe:1`). Sin encoders ni decoders: solo los protocolos, demuxers,
+  parsers y los muxers que hacen falta. Cada ABI se publica como `libffmpeg_rtsp.so` para que
   Android lo instale en el directorio de bibliotecas nativas de la app, el único desde el
   que puede ejecutar ficheros.
 
@@ -31,6 +32,7 @@ sin `--enable-gpl`, `--enable-nonfree` ni `--enable-version3`.
 | `build-decoder.sh` | Compilación reproducible del AAR `lib-decoder-ffmpeg` |
 | `build-cli.sh` | Compilación reproducible del AAR `lib-ffmpeg-rtsp` (el ejecutable de cada ABI); se ejecuta tras `build-decoder.sh` |
 | `gradle/easiptv-decoder.init.gradle` | Fija NDK, CMake, minSdk, ABIs y rutas sin tocar el código de Media3 |
+| `patches/cli` | Parches sobre FFmpeg que solo aplica `build-cli.sh` (publicados en `changes.diff`) |
 | `scripts/check-relro.sh` | Comprueba que el RELRO de las `.so` de 64 bits es seguro con páginas de 16 KB |
 | `scripts/verify-checksums.sh` | Compara una compilación con los SHA-256 de una release |
 | `releases/<tag>/SHA256SUMS` | Hashes publicados de cada release |
@@ -39,8 +41,8 @@ Decoders incluidos (solo audio): `aac mp3 ac3 eac3 dca mlp truehd flac alac pcm_
 Ninguno es GPL según el `LICENSE.md` de FFmpeg. ABIs: `armeabi-v7a arm64-v8a x86 x86_64`,
 API mínima 29, NDK r28c (las `.so` de 64 bits quedan alineadas a 16 KB).
 
-Herramienta RTSP: protocolos `tcp udp rtp pipe`, demuxers `rtsp rtp sdp mpegts`, muxer
-`mpegts`, parsers `h264 hevc aac aac_latm ac3 mpegaudio mpeg4video mpegvideo` y el filtro
+Herramienta RTSP: protocolos `tcp udp rtp pipe`, demuxers `rtsp rtp sdp mpegts`, muxers
+`mpegts matroska`, parsers `h264 hevc aac aac_latm ac3 mpegaudio mpeg4video mpegvideo` y el filtro
 de bitstream `setts` (pone a cada paquete las marcas de tiempo que MPEG-TS necesita y RTP
 no trae). `build-cli.sh` falla si `config_components.h` activa algún encoder o decoder.
 
@@ -53,7 +55,9 @@ Cada versión de EasIPTV Player que incluye este decodificador tiene un tag
 - desde `app-1.5.0-2`, el AAR `lib-ffmpeg-rtsp-<FFmpeg>-app-<versión>-<n>.aar` con `jni/<abi>/libffmpeg_rtsp.so`;
 - `ffmpeg-<tag>-source.tar.gz`: el código fuente **exacto** de FFmpeg compilado;
 - `media3-decoder_ffmpeg-<Media3>-source.tar.gz`: el código del envoltorio JNI;
-- `changes.diff`: los cambios sobre FFmpeg y Media3 (vacío si no hay ninguno);
+- `changes.diff`: los cambios sobre FFmpeg y Media3 (desde `app-1.5.0-3`, los parches de
+  `patches/cli`, que solo usa la herramienta RTSP; el decodificador compila FFmpeg sin cambios);
+- desde `app-1.5.0-3`, `COPYING.LGPLv2.1`: el texto de la licencia de FFmpeg;
 - `BUILD.md`: líneas de `configure` completas, commits, NDK, decoders y comprobaciones de las `.so`;
 - `SHA256SUMS`.
 
@@ -66,7 +70,7 @@ source versions.env
 sdkmanager --install "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION"
 ANDROID_HOME=~/Android/Sdk JAVA_HOME=/ruta/a/jdk-21 ./build-decoder.sh
 ANDROID_HOME=~/Android/Sdk ./build-cli.sh
-bash scripts/verify-checksums.sh releases/app-1.5.0-2/SHA256SUMS
+bash scripts/verify-checksums.sh releases/app-1.5.0-3/SHA256SUMS
 ```
 
 El resultado queda en `dist/`. La compilación es reproducible: con las mismas
@@ -79,7 +83,8 @@ hashes publicados.
 `libffmpegJNI.so` enlaza FFmpeg de forma estática. Para usar un FFmpeg
 modificado, sustituye `external/ffmpeg` (o el árbol de `ffmpeg-<tag>-source.tar.gz`)
 y ejecuta `./build-decoder.sh`; el AAR resultante sustituye al de la app.
-`libffmpeg_rtsp.so` es entero código de FFmpeg: `./build-cli.sh` lo recompila igual.
+`libffmpeg_rtsp.so` es entero código de FFmpeg con los parches de `patches/cli`:
+`./build-cli.sh` lo recompila igual.
 
 ### Licencias
 
@@ -98,8 +103,10 @@ no `--enable-gpl`, `--enable-nonfree` or `--enable-version3`.
 - The **audio decoder**: the official `decoder_ffmpeg` extension of
   [androidx/media](https://github.com/androidx/media) (Media3).
 - The **command line tool for RTSP** (since `app-1.5.0-2`): the `ffmpeg` program, which the
-  app runs to remux an RTSP session into MPEG-TS (`-c copy -f mpegts pipe:1`). No encoders
-  or decoders: only the protocols, demuxers, parsers and the muxer it needs. Each ABI ships
+  app runs to remux an RTSP session into MPEG-TS (`-c copy -f mpegts pipe:1`) or, since
+  `app-1.5.0-3`, into Matroska to record audio MPEG-TS does not carry, such as G.711, Opus or
+  AMR (`-c copy -f matroska pipe:1`). No encoders
+  or decoders: only the protocols, demuxers, parsers and the muxers it needs. Each ABI ships
   as `libffmpeg_rtsp.so` so that Android installs it in the app's native library directory,
   the only one it may execute files from.
 
@@ -113,6 +120,7 @@ no `--enable-gpl`, `--enable-nonfree` or `--enable-version3`.
 | `build-decoder.sh` | Reproducible build of the `lib-decoder-ffmpeg` AAR |
 | `build-cli.sh` | Reproducible build of the `lib-ffmpeg-rtsp` AAR (the executable of each ABI); runs after `build-decoder.sh` |
 | `gradle/easiptv-decoder.init.gradle` | Pins NDK, CMake, minSdk, ABIs and paths without changing Media3 sources |
+| `patches/cli` | Patches to FFmpeg that only `build-cli.sh` applies (published in `changes.diff`) |
 | `scripts/check-relro.sh` | Checks that the RELRO of 64-bit `.so` files is safe with 16 KB pages |
 | `scripts/verify-checksums.sh` | Compares a build with the SHA-256 sums of a release |
 | `releases/<tag>/SHA256SUMS` | Published checksums of each release |
@@ -121,7 +129,7 @@ Decoders (audio only): `aac mp3 ac3 eac3 dca mlp truehd flac alac pcm_mulaw pcm_
 None of them is GPL according to FFmpeg's `LICENSE.md`. ABIs: `armeabi-v7a arm64-v8a x86 x86_64`,
 minimum API 29, NDK r28c (64-bit `.so` files are 16 KB aligned).
 
-RTSP tool: protocols `tcp udp rtp pipe`, demuxers `rtsp rtp sdp mpegts`, muxer `mpegts`,
+RTSP tool: protocols `tcp udp rtp pipe`, demuxers `rtsp rtp sdp mpegts`, muxers `mpegts matroska`,
 parsers `h264 hevc aac aac_latm ac3 mpegaudio mpeg4video mpegvideo` and the `setts`
 bitstream filter (it gives every packet the timestamps MPEG-TS needs and RTP lacks).
 `build-cli.sh` fails if `config_components.h` enables any encoder or decoder.
@@ -135,7 +143,9 @@ Every EasIPTV Player version that ships this decoder has a tag
 - since `app-1.5.0-2`, the AAR `lib-ffmpeg-rtsp-<FFmpeg>-app-<version>-<n>.aar` with `jni/<abi>/libffmpeg_rtsp.so`;
 - `ffmpeg-<tag>-source.tar.gz`: the **exact** FFmpeg source code that was built;
 - `media3-decoder_ffmpeg-<Media3>-source.tar.gz`: the JNI wrapper sources;
-- `changes.diff`: changes to FFmpeg and Media3 (empty when there are none);
+- `changes.diff`: changes to FFmpeg and Media3 (since `app-1.5.0-3`, the patches of
+  `patches/cli`, used by the RTSP tool only; the decoder builds FFmpeg unmodified);
+- since `app-1.5.0-3`, `COPYING.LGPLv2.1`: the license text of FFmpeg;
 - `BUILD.md`: full `configure` lines, commits, NDK, decoders and checks of the `.so` files;
 - `SHA256SUMS`.
 
@@ -148,7 +158,7 @@ source versions.env
 sdkmanager --install "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION"
 ANDROID_HOME=~/Android/Sdk JAVA_HOME=/path/to/jdk-21 ./build-decoder.sh
 ANDROID_HOME=~/Android/Sdk ./build-cli.sh
-bash scripts/verify-checksums.sh releases/app-1.5.0-2/SHA256SUMS
+bash scripts/verify-checksums.sh releases/app-1.5.0-3/SHA256SUMS
 ```
 
 Output goes to `dist/`. The build is reproducible: the same inputs (and a JDK 21)
@@ -160,7 +170,8 @@ it on GitHub Actions and compares it with the published checksums.
 `libffmpegJNI.so` links FFmpeg statically. To use a modified FFmpeg, replace
 `external/ffmpeg` (or the tree from `ffmpeg-<tag>-source.tar.gz`) and run
 `./build-decoder.sh`; the resulting AAR replaces the one in the app.
-`libffmpeg_rtsp.so` is FFmpeg code only: `./build-cli.sh` rebuilds it the same way.
+`libffmpeg_rtsp.so` is FFmpeg code only, plus the patches of `patches/cli`:
+`./build-cli.sh` rebuilds it the same way.
 
 ### Licenses
 
