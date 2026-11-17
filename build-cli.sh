@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds the FFmpeg command line tool EasIPTV Player runs to read RTSP: it only
 # remuxes (-c copy) an RTSP session into MPEG-TS on its standard output, or into
-# Matroska to record audio MPEG-TS does not carry. FFmpeg is LGPL-2.1+ only,
+# a fragmented MP4 file to record audio MPEG-TS does not carry (the file
+# protocol is there for that output only). FFmpeg is LGPL-2.1+ only,
 # without encoders or decoders, plus the patches of patches/cli (published in
 # changes.diff). The executable of each ABI is
 # named libffmpeg_rtsp.so so that Android installs it in the app's native
@@ -32,6 +33,9 @@ fail() {
 source "$ROOT/versions.env"
 read -r -a ABI_LIST <<< "$ABIS"
 IFS=, read -r -a MUXER_LIST <<< "$CLI_MUXERS"
+IFS=, read -r -a PROTOCOL_LIST <<< "$CLI_PROTOCOLS"
+# The rtsp demuxer selects http (RTSP over HTTP); the app's input whitelist leaves it out
+readonly PROTOCOLS_SELECTED_BY_DEMUXERS="http"
 readonly RELEASE_TAG="app-${APP_VERSION}-${BUILD_NUMBER}"
 readonly AAR_NAME="lib-ffmpeg-rtsp-${FFMPEG_TAG}-${RELEASE_TAG}.aar"
 readonly SOURCE_ARCHIVE="ffmpeg-$FFMPEG_TAG-source.tar.gz"
@@ -96,10 +100,11 @@ configure_options_for() {
 }
 
 # Fails unless the generated config.h is LGPL-2.1+ only and config_components.h
-# has every muxer of CLI_MUXERS and no encoder or decoder.
+# has every muxer of CLI_MUXERS, exactly the protocols of CLI_PROTOCOLS (plus
+# what the demuxers select: no TLS, nothing else) and no encoder or decoder.
 require_lgpl_remuxer_config() {
     local config_header="$1" components_header="$2"
-    local flag muxer
+    local flag muxer enabled_protocols expected_protocols
     for flag in CONFIG_GPL CONFIG_NONFREE CONFIG_VERSION3; do
         grep -qx "#define $flag 0" "$config_header" || fail "$config_header does not have $flag 0"
     done
@@ -111,6 +116,11 @@ require_lgpl_remuxer_config() {
     for muxer in "${MUXER_LIST[@]}"; do
         grep -qx "#define CONFIG_${muxer^^}_MUXER 1" "$components_header" || fail "$components_header has no $muxer muxer"
     done
+    enabled_protocols="$(sed -nE 's/^#define CONFIG_([A-Z0-9_]+)_PROTOCOL 1$/\1/p' "$components_header" \
+        | tr '[:upper:]' '[:lower:]' | LC_ALL=C sort | tr '\n' ' ')"
+    expected_protocols="$(printf '%s\n' "${PROTOCOL_LIST[@]}" "$PROTOCOLS_SELECTED_BY_DEMUXERS" | LC_ALL=C sort | tr '\n' ' ')"
+    [[ "$enabled_protocols" == "$expected_protocols" ]] \
+        || fail "$components_header enables the protocols '$enabled_protocols', expected '$expected_protocols'"
     if grep -E '^#define CONFIG_[A-Z0-9_]+_(ENCODER|DECODER) 1$' "$components_header"; then
         fail "$components_header enables an encoder or a decoder"
     fi
@@ -245,8 +255,13 @@ write_build_notes() {
         printf '`%s` holds `jni/<abi>/%s`: the `ffmpeg` program of FFmpeg %s (`%s`), LGPL version 2.1 or later\n' \
             "$AAR_NAME" "$EXECUTABLE_NAME" "$FFMPEG_TAG" "$FFMPEG_COMMIT"
         printf '(`CONFIG_GPL 0`, `CONFIG_NONFREE 0`, `CONFIG_VERSION3 0`), without encoders or decoders. EasIPTV Player runs it as\n'
-        printf '`ffmpeg -i rtsp://… -c copy -f mpegts pipe:1` and reads the MPEG-TS from its standard output, or with\n'
-        printf '`-f matroska pipe:1` to record audio that MPEG-TS does not carry (G.711, Opus, AMR…).\n\n'
+        printf '`ffmpeg -protocol_whitelist tcp,udp,rtp -i rtsp://… -c copy -f mpegts pipe:1` and reads the MPEG-TS from its\n'
+        printf 'standard output. To record audio that MPEG-TS does not carry it writes a fragmented MP4 file instead, with\n'
+        printf 'the variant of the mov muxer that takes the codec: `-f mov` for G.711, `-f 3gp` for AMR-NB/WB, `-f mp4` for\n'
+        printf 'Opus (and AAC), and `-movflags +frag_keyframe+empty_moov+default_base_moof -frag_duration <µs> -flush_packets 1`.\n\n'
+        printf '**The `file` protocol is there to write that recording only.** `-protocol_whitelist tcp,udp,rtp` is an input\n'
+        printf 'option: with it the input cannot open `file:`/plain paths, `pipe:` or `http` (also RTSP over HTTP), RTSP\n'
+        printf 'redirects reconnect over RTSP/TCP only, and `concat:`, `subfile:`, `fd:` and TLS are not built.\n\n'
         printf '| Input | Value |\n|---|---|\n'
         printf '| Android NDK | %s |\n' "$NDK_VERSION"
         printf '| Minimum API | %s |\n' "$ANDROID_API"

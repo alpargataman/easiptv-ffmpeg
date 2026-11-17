@@ -2,7 +2,7 @@ libavformat: take the picture size of a video stream from its parser
 
 FFmpeg n6.0.1 only learns the width and height of H.264 and HEVC from the
 decoder. The command line tool has no decoders, so a stream copy of RTSP into
-Matroska failed with "dimensions not set" (MPEG-TS does not store them). The
+MP4 or Matroska failed with "dimensions not set" (MPEG-TS does not store them). The
 parsers already compute the size from the SPS: copy it into the stream
 parameters when nothing else set them.
 
@@ -17,7 +17,7 @@ unmodified FFmpeg n6.0.1.
                                 pkt->pts, pkt->dts, pkt->pos);
  
 +        /* Without a decoder only the parser knows the picture size (H.264, HEVC);
-+         * a stream copy into a muxer that stores it (Matroska) needs it. */
++         * a stream copy into a muxer that stores it (MP4, Matroska) needs it. */
 +        if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && !sti->avctx->width &&
 +            sti->parser->width > 0 && sti->parser->height > 0) {
 +            sti->avctx->width  = sti->parser->width;

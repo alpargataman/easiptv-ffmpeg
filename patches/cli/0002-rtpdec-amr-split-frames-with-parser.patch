@@ -1,0 +1,30 @@
+libavformat/rtpdec_amr: split the AMR frames of an RTP packet with the parser
+
+An RTP packet of AMR-NB or AMR-WB carries several frames (RFC 4867). The
+depacketizer hands them to the demuxer as one packet, and the mov muxer
+refuses it ("input is not a single packet, implement a AVParser for it").
+FFmpeg already has the amr parser: ask the RTSP demuxer to run it, so that
+every packet is one frame with its own timestamp and duration.
+
+Modified by easiptv-ffmpeg on 2026-11-17, for the command line tool
+(build-cli.sh) only: the audio decoder (build-decoder.sh) builds the
+unmodified FFmpeg n6.0.1.
+
+--- a/libavformat/rtpdec_amr.c
++++ b/libavformat/rtpdec_amr.c
+@@ -186,6 +186,7 @@
+     .enc_name         = "AMR",
+     .codec_type       = AVMEDIA_TYPE_AUDIO,
+     .codec_id         = AV_CODEC_ID_AMR_NB,
++    .need_parsing     = AVSTREAM_PARSE_FULL,
+     .priv_data_size   = sizeof(PayloadContext),
+     .init             = amr_init,
+     .parse_sdp_a_line = amr_parse_sdp_line,
+@@ -196,6 +197,7 @@
+     .enc_name         = "AMR-WB",
+     .codec_type       = AVMEDIA_TYPE_AUDIO,
+     .codec_id         = AV_CODEC_ID_AMR_WB,
++    .need_parsing     = AVSTREAM_PARSE_FULL,
+     .priv_data_size   = sizeof(PayloadContext),
+     .init             = amr_init,
+     .parse_sdp_a_line = amr_parse_sdp_line,

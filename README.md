@@ -16,8 +16,9 @@ sin `--enable-gpl`, `--enable-nonfree` ni `--enable-version3`.
   [androidx/media](https://github.com/androidx/media) (Media3).
 - La **herramienta de línea de comandos para RTSP** (desde `app-1.5.0-2`): el programa
   `ffmpeg`, que la app ejecuta para remultiplexar una sesión RTSP a MPEG-TS
-  (`-c copy -f mpegts pipe:1`) o, desde `app-1.5.0-3`, a Matroska para grabar audio que
-  MPEG-TS no lleva, como G.711, Opus o AMR (`-c copy -f matroska pipe:1`). Sin encoders ni decoders: solo los protocolos, demuxers,
+  (`-c copy -f mpegts pipe:1`) o, desde `app-1.5.0-4`, a un fichero MP4 fragmentado para grabar
+  audio que MPEG-TS no lleva, como G.711, AMR u Opus (`-f mov`, `-f 3gp` o `-f mp4`; en
+  `app-1.5.0-3` era Matroska por pipe, ya retirado). Sin encoders ni decoders: solo los protocolos, demuxers,
   parsers y los muxers que hacen falta. Cada ABI se publica como `libffmpeg_rtsp.so` para que
   Android lo instale en el directorio de bibliotecas nativas de la app, el único desde el
   que puede ejecutar ficheros.
@@ -41,10 +42,18 @@ Decoders incluidos (solo audio): `aac mp3 ac3 eac3 dca mlp truehd flac alac pcm_
 Ninguno es GPL según el `LICENSE.md` de FFmpeg. ABIs: `armeabi-v7a arm64-v8a x86 x86_64`,
 API mínima 29, NDK r28c (las `.so` de 64 bits quedan alineadas a 16 KB).
 
-Herramienta RTSP: protocolos `tcp udp rtp pipe`, demuxers `rtsp rtp sdp mpegts`, muxers
-`mpegts matroska`, parsers `h264 hevc aac aac_latm ac3 mpegaudio mpeg4video mpegvideo` y el filtro
-de bitstream `setts` (pone a cada paquete las marcas de tiempo que MPEG-TS necesita y RTP
-no trae). `build-cli.sh` falla si `config_components.h` activa algún encoder o decoder.
+Herramienta RTSP: protocolos `tcp udp rtp pipe file`, demuxers `rtsp rtp sdp mpegts`, muxers
+`mpegts mov mp4 3gp`, parsers `h264 hevc aac aac_latm ac3 mpegaudio mpeg4video mpegvideo amr` y el
+filtro de bitstream `setts` (pone a cada paquete las marcas de tiempo que MPEG-TS necesita y RTP
+no trae). `build-cli.sh` falla si `config_components.h` activa algún encoder o decoder, o algún
+protocolo distinto de esos (más `http`, que arrastra `rtsp`; nada de TLS).
+
+**El protocolo `file` está solo para escribir la grabación.** La app limita la entrada con
+`-protocol_whitelist tcp,udp,rtp` (opción de entrada): así la entrada no puede abrir `file:` ni
+rutas, `pipe:` ni `http` (tampoco RTSP sobre HTTP), las redirecciones RTSP solo se siguen por
+RTSP/TCP, y `concat:`, `subfile:`, `fd:` y TLS no están compilados. `patches/cli` tiene tres
+parches pequeños sobre FFmpeg n6.0.1, solo para esta herramienta: el tamaño de imagen desde el
+parser, las tramas AMR de RTP de una en una y la duración de un MP4 fragmentado al cerrarlo.
 
 ### Releases y tags
 
@@ -70,7 +79,7 @@ source versions.env
 sdkmanager --install "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION"
 ANDROID_HOME=~/Android/Sdk JAVA_HOME=/ruta/a/jdk-21 ./build-decoder.sh
 ANDROID_HOME=~/Android/Sdk ./build-cli.sh
-bash scripts/verify-checksums.sh releases/app-1.5.0-3/SHA256SUMS
+bash scripts/verify-checksums.sh releases/app-1.5.0-4/SHA256SUMS
 ```
 
 El resultado queda en `dist/`. La compilación es reproducible: con las mismas
@@ -104,8 +113,9 @@ no `--enable-gpl`, `--enable-nonfree` or `--enable-version3`.
   [androidx/media](https://github.com/androidx/media) (Media3).
 - The **command line tool for RTSP** (since `app-1.5.0-2`): the `ffmpeg` program, which the
   app runs to remux an RTSP session into MPEG-TS (`-c copy -f mpegts pipe:1`) or, since
-  `app-1.5.0-3`, into Matroska to record audio MPEG-TS does not carry, such as G.711, Opus or
-  AMR (`-c copy -f matroska pipe:1`). No encoders
+  `app-1.5.0-4`, into a fragmented MP4 file to record audio MPEG-TS does not carry, such as
+  G.711, AMR or Opus (`-f mov`, `-f 3gp` or `-f mp4`; `app-1.5.0-3` used Matroska on a pipe,
+  now removed). No encoders
   or decoders: only the protocols, demuxers, parsers and the muxers it needs. Each ABI ships
   as `libffmpeg_rtsp.so` so that Android installs it in the app's native library directory,
   the only one it may execute files from.
@@ -129,10 +139,18 @@ Decoders (audio only): `aac mp3 ac3 eac3 dca mlp truehd flac alac pcm_mulaw pcm_
 None of them is GPL according to FFmpeg's `LICENSE.md`. ABIs: `armeabi-v7a arm64-v8a x86 x86_64`,
 minimum API 29, NDK r28c (64-bit `.so` files are 16 KB aligned).
 
-RTSP tool: protocols `tcp udp rtp pipe`, demuxers `rtsp rtp sdp mpegts`, muxers `mpegts matroska`,
-parsers `h264 hevc aac aac_latm ac3 mpegaudio mpeg4video mpegvideo` and the `setts`
-bitstream filter (it gives every packet the timestamps MPEG-TS needs and RTP lacks).
-`build-cli.sh` fails if `config_components.h` enables any encoder or decoder.
+RTSP tool: protocols `tcp udp rtp pipe file`, demuxers `rtsp rtp sdp mpegts`, muxers
+`mpegts mov mp4 3gp`, parsers `h264 hevc aac aac_latm ac3 mpegaudio mpeg4video mpegvideo amr`
+and the `setts` bitstream filter (it gives every packet the timestamps MPEG-TS needs and RTP
+lacks). `build-cli.sh` fails if `config_components.h` enables any encoder or decoder, or any
+protocol other than those (plus `http`, which `rtsp` selects; no TLS).
+
+**The `file` protocol is there to write the recording only.** The app restricts the input with
+`-protocol_whitelist tcp,udp,rtp` (an input option): the input then cannot open `file:` or
+paths, `pipe:` or `http` (nor RTSP over HTTP), RTSP redirects are only followed over RTSP/TCP,
+and `concat:`, `subfile:`, `fd:` and TLS are not built. `patches/cli` holds three small patches
+to FFmpeg n6.0.1, for this tool only: the picture size from the parser, the AMR frames of RTP
+one by one, and the duration of a fragmented MP4 when it is closed.
 
 ### Releases and tags
 
@@ -158,7 +176,7 @@ source versions.env
 sdkmanager --install "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION"
 ANDROID_HOME=~/Android/Sdk JAVA_HOME=/path/to/jdk-21 ./build-decoder.sh
 ANDROID_HOME=~/Android/Sdk ./build-cli.sh
-bash scripts/verify-checksums.sh releases/app-1.5.0-3/SHA256SUMS
+bash scripts/verify-checksums.sh releases/app-1.5.0-4/SHA256SUMS
 ```
 
 Output goes to `dist/`. The build is reproducible: the same inputs (and a JDK 21)

@@ -1,0 +1,101 @@
+libavformat/movenc: write the durations of a fragmented empty_moov file
+
+With empty_moov the moov goes out before any sample, so its mvhd and tkhd
+durations are zero and FFmpeg n6.0.1 writes no mehd: Media3 (which reads the
+duration from mehd or tkhd) then sees an unknown duration even after a
+normal stop, although the mfra makes the file seekable. When the trailer
+has written the last fragment, write the real durations into those 32-bit
+fields in place. Nothing moves, so the cost does not depend on the size of
+the file, and a recording killed before the trailer keeps the zeros
+(unknown duration) and stays readable. Outputs that cannot seek are left
+as they were.
+
+Modified by easiptv-ffmpeg on 2026-11-17, for the command line tool
+(build-cli.sh) only: the audio decoder (build-decoder.sh) builds the
+unmodified FFmpeg n6.0.1.
+
+--- a/libavformat/movenc.h
++++ b/libavformat/movenc.h
+@@ -89,6 +89,7 @@
+     unsigned    timescale;
+     uint64_t    time;
+     int64_t     track_duration;
++    int64_t     tkhd_duration_pos; ///< 32-bit tkhd duration in the output, rewritten by the trailer (fragments)
+     int         last_sample_is_subtitle_end;
+     long        sample_count;
+     long        sample_size;
+@@ -215,6 +216,7 @@
+ 
+     int reserved_moov_size; ///< 0 for disabled, -1 for automatic, size otherwise
+     int64_t reserved_header_pos;
++    int64_t mvhd_duration_pos; ///< 32-bit mvhd duration in the output, rewritten by the trailer (fragments)
+ 
+     char *major_brand;
+ 
+--- a/libavformat/movenc.c
++++ b/libavformat/movenc.c
+@@ -3327,6 +3327,8 @@
+     }
+     avio_wb32(pb, track->track_id); /* track-id */
+     avio_wb32(pb, 0); /* reserved */
++    if (version == 0 && pb == mov->fc->pb)
++        track->tkhd_duration_pos = avio_tell(pb);
+     if (!track->entry && mov->mode == MODE_ISM)
+         (version == 1) ? avio_wb64(pb, UINT64_C(0xffffffffffffffff)) : avio_wb32(pb, 0xffffffff);
+     else if (!track->entry)
+@@ -3814,6 +3816,8 @@
+         timescale = mov->tracks[0].timescale;
+ 
+     avio_wb32(pb, timescale);
++    if (version == 0 && pb == mov->fc->pb)
++        mov->mvhd_duration_pos = avio_tell(pb);
+     (version == 1) ? avio_wb64(pb, max_track_len) : avio_wb32(pb, max_track_len); /* duration of longest track */
+ 
+     avio_wb32(pb, 0x00010000); /* reserved (preferred rate) 1.0 = normal */
+@@ -7500,6 +7504,37 @@
+     return ff_format_shift_data(s, mov->reserved_header_pos, moov_size);
+ }
+ 
++/* A fragmented file written with empty_moov has a moov whose durations are
++ * zero: players that read them (and no mehd) see an unknown duration. Once
++ * the last fragment is out, write the real durations in place; the fields
++ * keep their size, so nothing moves, and a file whose writer dies before
++ * this point stays as before (zero = unknown). */
++static void mov_write_fragmented_durations(AVFormatContext *s)
++{
++    MOVMuxContext *mov = s->priv_data;
++    AVIOContext *pb = s->pb;
++    int64_t end = avio_tell(pb), longest = 0;
++
++    if (!(pb->seekable & AVIO_SEEKABLE_NORMAL))
++        return;
++    for (int i = 0; i < mov->nb_streams; i++) {
++        MOVTrack *track = &mov->tracks[i];
++        int64_t duration;
++        if (!track->timescale)
++            continue;
++        duration = av_rescale_rnd(calc_pts_duration(mov, track), mov->movie_timescale,
++                                  track->timescale, AV_ROUND_UP);
++        if (duration <= 0 || duration >= INT32_MAX)
++            continue;
++        longest = FFMAX(longest, duration);
++        if (track->tkhd_duration_pos > 0 && avio_seek(pb, track->tkhd_duration_pos, SEEK_SET) >= 0)
++            avio_wb32(pb, duration);
++    }
++    if (longest > 0 && mov->mvhd_duration_pos > 0 && avio_seek(pb, mov->mvhd_duration_pos, SEEK_SET) >= 0)
++        avio_wb32(pb, longest);
++    avio_seek(pb, end, SEEK_SET);
++}
++
+ static int mov_write_trailer(AVFormatContext *s)
+ {
+     MOVMuxContext *mov = s->priv_data;
+@@ -7601,6 +7636,8 @@
+         mov_auto_flush_fragment(s, 1);
+         for (i = 0; i < mov->nb_streams; i++)
+            mov->tracks[i].data_offset = 0;
++        if (mov->flags & FF_MOV_FLAG_EMPTY_MOOV)
++            mov_write_fragmented_durations(s);
+         if (mov->flags & FF_MOV_FLAG_GLOBAL_SIDX) {
+             int64_t end;
+             av_log(s, AV_LOG_INFO, "Starting second pass: inserting sidx atoms\n");
